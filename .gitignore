@@ -1,0 +1,79 @@
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+parts/
+var/
+sdist/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+.installed.cfg
+MANIFEST
+
+# ── Ambientes virtuais ─────────────────────────────────────────────────────────
+.venv/
+venv/
+ENV/
+env/
+.env.bak
+
+# ── Credenciais e segredos ─────────────────────────────────────────────────────
+.env
+*.env
+.env.local
+.env.*.local
+secrets.json
+secrets.yaml
+
+# ── Outputs da ferramenta ──────────────────────────────────────────────────────
+*.html
+*.json
+relatorio*.html
+out*.json
+report*.html
+
+# ── Solidity / Web3 ───────────────────────────────────────────────────────────
+*.sol
+crytic-export/
+slither-report*/
+echidna-corpus/
+
+# ── Semgrep ────────────────────────────────────────────────────────────────────
+.semgrep/
+.semgrep_cache/
+semgrep-*.json
+
+# ── IDEs e editores ────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ── Testes e cobertura ─────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+.hypothesis/
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+*.log
+logs/
+
+# ── Misc ──────────────────────────────────────────────────────────────────────
+.cache/
+tmp/
+temp/

@@ -1,0 +1,39 @@
+# Dependências — nunca auditar
+node_modules/
+.pnpm/
+.yarn/
+vendor/
+
+# Build outputs
+.next/
+out/
+dist/
+build/
+.turbo/
+.cache/
+
+# Testes — menor prioridade, muito ruído
+**/*.test.ts
+**/*.test.tsx
+**/*.test.js
+**/*.spec.ts
+**/*.spec.tsx
+**/*.spec.js
+**/__tests__/
+**/__mocks__/
+
+# Fixtures e snapshots
+**/__snapshots__/
+**/fixtures/
+**/test-data/
+
+# Configs e lock files
+*.lock
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# Gerados
+*.min.js
+*.min.css
+*.d.ts
