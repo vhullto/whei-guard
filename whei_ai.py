@@ -132,13 +132,20 @@ def validar_exploitabilidade_web2(finding: dict) -> dict:
 
 
 # ── Modelos disponíveis ──────────────────────────────────────────────────────
-# Chave usada em --model na CLI. Valor é o model ID do Groq.
+# Groq — chave usada em --model quando --provider groq (padrão)
 GROQ_MODELS = {
     "scout":     "meta-llama/llama-4-scout-17b-16e-instruct",  # 500k TPD, 30k TPM — padrão
     "versatile": "llama-3.3-70b-versatile",                    # 100k TPD, 12k TPM — mais capaz
     "qwen":      "qwen/qwen3-32b",                             # 500k TPD, 6k TPM
 }
 DEFAULT_MODEL = "scout"
+
+# Anthropic — chave usada em --model quando --provider anthropic
+ANTHROPIC_MODELS = {
+    "sonnet":  "claude-sonnet-4-5",   # Melhor custo-benefício — recomendado
+    "haiku":   "claude-haiku-4-5",    # Mais rápido e barato
+}
+DEFAULT_ANTHROPIC_MODEL = "sonnet"
 
 # Intervalo mínimo entre chamadas à API Groq (segundos).
 # O plano gratuito permite ~30 req/min → 2s de margem segura.
@@ -150,6 +157,12 @@ try:
     GROQ_AVAILABLE = True
 except ImportError:
     GROQ_AVAILABLE = False
+
+try:
+    import anthropic
+    ANTHROPIC_AVAILABLE = True
+except ImportError:
+    ANTHROPIC_AVAILABLE = False
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -365,63 +378,130 @@ def _parse_json_robust(raw: str) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  Cliente Groq
+#  Clientes — Groq e Anthropic
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _get_client():
+def _load_env_key(key_name: str) -> str | None:
+    """Lê uma chave do ambiente ou do arquivo .env."""
+    value = os.environ.get(key_name)
+    if value:
+        return value
+    env_path = os.path.join(os.path.dirname(__file__), ".env")
+    if os.path.exists(env_path):
+        with open(env_path) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith(f"{key_name}="):
+                    return line.split("=", 1)[1].strip().strip('"').strip("'")
+    return None
+
+
+def _get_client(provider: str = "groq"):
+    """
+    Retorna o cliente de IA configurado para o provider informado.
+
+    Args:
+        provider: "groq" (padrão) ou "anthropic"
+
+    Returns:
+        Tupla (client, provider_name) para uso em _call_ai()
+    """
+    if provider == "anthropic":
+        if not ANTHROPIC_AVAILABLE:
+            raise RuntimeError(
+                "Pacote anthropic nao instalado. Execute: pip install anthropic"
+            )
+        api_key = _load_env_key("ANTHROPIC_API_KEY")
+        if not api_key:
+            raise RuntimeError(
+                "ANTHROPIC_API_KEY nao encontrada.\n"
+                "Adicione ao .env:\n"
+                "  ANTHROPIC_API_KEY=sk-ant-xxxxxxxxxxxxxxxxxxxx"
+            )
+        return anthropic.Anthropic(api_key=api_key), "anthropic"
+
+    # Groq (padrão)
     if not GROQ_AVAILABLE:
         raise RuntimeError("Pacote groq nao instalado. Execute: pip install groq")
-
-    api_key = os.environ.get("GROQ_API_KEY")
-    if not api_key:
-        env_path = os.path.join(os.path.dirname(__file__), ".env")
-        if os.path.exists(env_path):
-            with open(env_path) as f:
-                for line in f:
-                    line = line.strip()
-                    if line.startswith("GROQ_API_KEY="):
-                        api_key = line.split("=", 1)[1].strip().strip('"').strip("'")
-                        break
-
+    api_key = _load_env_key("GROQ_API_KEY")
     if not api_key:
         raise RuntimeError(
             "GROQ_API_KEY nao encontrada.\n"
             "Crie um arquivo .env com:\n"
             "  GROQ_API_KEY=gsk_xxxxxxxxxxxxxxxxxxxx"
         )
-
-    return Groq(api_key=api_key)
+    return Groq(api_key=api_key), "groq"
 
 
 def _call_groq(client, system: str, user: str, model: str = None) -> dict:
     """
     Chamada à API Groq com parse robusto e throttle automático.
+    Mantido para compatibilidade — internamente delega a _call_ai().
+    """
+    return _call_ai(client, "groq", system, user, model=model)
 
-    Respeita _GROQ_CALL_DELAY entre chamadas consecutivas para evitar
-    HTTP 429 no plano gratuito (~30 req/min).
+
+def _call_anthropic(client, system: str, user: str, model: str = None) -> dict:
+    """Chamada à API Anthropic com parse robusto."""
+    return _call_ai(client, "anthropic", system, user, model=model)
+
+
+def _call_ai(client, provider: str, system: str, user: str, model: str = None) -> dict:
+    """
+    Chamada unificada de IA com throttle (Groq) e parse robusto.
+
+    Args:
+        client:   instância do cliente (Groq ou anthropic.Anthropic)
+        provider: "groq" | "anthropic"
+        system:   prompt de sistema
+        user:     prompt de usuário
+        model:    model ID ou chave do dicionário de modelos
     """
     global _last_groq_call
-    elapsed = time.monotonic() - _last_groq_call
-    if elapsed < _GROQ_CALL_DELAY:
-        time.sleep(_GROQ_CALL_DELAY - elapsed)
+
+    if provider == "groq":
+        # Throttle apenas para Groq (rate limit do plano gratuito)
+        elapsed = time.monotonic() - _last_groq_call
+        if elapsed < _GROQ_CALL_DELAY:
+            time.sleep(_GROQ_CALL_DELAY - elapsed)
 
     try:
-        response = client.chat.completions.create(
-            model=model or GROQ_MODELS[DEFAULT_MODEL],
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user",   "content": user},
-            ],
-            temperature=0.1,
-            max_tokens=4096,
-            response_format={"type": "json_object"},
-        )
-        raw = response.choices[0].message.content
+        if provider == "anthropic":
+            resolved_model = (
+                ANTHROPIC_MODELS.get(model, model)
+                if model and model in ANTHROPIC_MODELS
+                else ANTHROPIC_MODELS[DEFAULT_ANTHROPIC_MODEL]
+            )
+            response = client.messages.create(
+                model=resolved_model,
+                max_tokens=4096,
+                temperature=0.1,
+                system=system,
+                messages=[{"role": "user", "content": user}],
+            )
+            raw = response.content[0].text
+
+        else:  # groq
+            resolved_model = model or GROQ_MODELS[DEFAULT_MODEL]
+            response = client.chat.completions.create(
+                model=resolved_model,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user",   "content": user},
+                ],
+                temperature=0.1,
+                max_tokens=4096,
+                response_format={"type": "json_object"},
+            )
+            raw = response.choices[0].message.content
+
         return _parse_json_robust(raw)
+
     except Exception as exc:
         return {"erro": str(exc)}
     finally:
-        _last_groq_call = time.monotonic()
+        if provider == "groq":
+            _last_groq_call = time.monotonic()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -540,15 +620,18 @@ def _extract_source_web2(finding: dict) -> str:
 #  API pública
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def analyze_finding(finding: dict, alvo: str, client, target: str = "web3", model: str = None) -> dict:
+def analyze_finding(finding: dict, alvo: str, client, target: str = "web3",
+                    model: str = None, provider: str = "groq") -> dict:
     """
     Analisa um finding individual com a IA.
 
     Args:
-        finding: dicionário normalizado do finding.
-        alvo:    caminho do alvo (arquivo ou diretório).
-        client:  instância do cliente Groq.
-        target:  "web3" (padrão) ou "web2".
+        finding:  dicionário normalizado do finding.
+        alvo:     caminho do alvo (arquivo ou diretório).
+        client:   instância do cliente (Groq ou Anthropic).
+        target:   "web3" (padrão) ou "web2".
+        model:    chave do modelo no dicionário do provider.
+        provider: "groq" (padrão) ou "anthropic".
     """
     system_prompt, _ = _get_system_prompts(target)
     element_name     = _extract_element_name(finding)
@@ -585,17 +668,20 @@ def analyze_finding(finding: dict, alvo: str, client, target: str = "web3", mode
         trecho_fonte = trecho_fonte,
     )
 
-    return _call_groq(client, system_prompt, user_prompt, model=model)
+    return _call_ai(client, provider, system_prompt, user_prompt, model=model)
 
 
-def analyze_executive_summary(findings_ai: list, client, target: str = "web3", model: str = None) -> dict:
+def analyze_executive_summary(findings_ai: list, client, target: str = "web3",
+                               model: str = None, provider: str = "groq") -> dict:
     """
     Gera resumo executivo consolidado a partir dos findings já analisados pela IA.
 
     Args:
         findings_ai: lista de findings enriquecidos.
-        client:      instância do cliente Groq.
+        client:      instância do cliente (Groq ou Anthropic).
         target:      "web3" (padrão) ou "web2".
+        model:       chave do modelo no dicionário do provider.
+        provider:    "groq" (padrão) ou "anthropic".
     """
     _, system_prompt = _get_system_prompts(target)
 
@@ -615,4 +701,4 @@ def analyze_executive_summary(findings_ai: list, client, target: str = "web3", m
         findings_json = json.dumps(compact, ensure_ascii=False, indent=2),
     )
 
-    return _call_groq(client, system_prompt, user_prompt, model=model)
+    return _call_ai(client, provider, system_prompt, user_prompt, model=model)

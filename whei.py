@@ -446,7 +446,8 @@ def _get_funcao_e_contrato(r, sl):
 def cmd_scan(args):
     alvo        = args.alvo
     target      = args.target            # "web3" | "web2"
-    model         = args.model           # "scout" | "versatile" | "qwen"
+    model         = args.model           # depende do provider
+    provider      = args.provider         # "groq" | "anthropic"
     semgrep_config = args.semgrep_config  # "auto" | "p/owasp-top-ten" | etc
     only        = args.only.capitalize() if args.only else None
     export_json = args.json
@@ -461,8 +462,11 @@ def cmd_scan(args):
     print(f"  {'Filtro':<20} {only or 'todos'}")
     print(f"  {'IA (Groq)':<20} {c('✦ ativa', ORANGE, use_color) if use_ai else '—'}")
     if use_ai:
-        from whei_ai import GROQ_MODELS
-        print(f"  {'Modelo':<20} {c(model, ORANGE, use_color)} {c(f'({GROQ_MODELS.get(model, model)})', DIM, use_color)}")
+        from whei_ai import GROQ_MODELS, ANTHROPIC_MODELS
+        _models = ANTHROPIC_MODELS if provider == "anthropic" else GROQ_MODELS
+        _model_display = model or ("sonnet" if provider == "anthropic" else "scout")
+        print(f"  {'Provider':<20} {c(provider.upper(), ORANGE, use_color)}")
+        print(f"  {'Modelo':<20} {c(_model_display, ORANGE, use_color)} {c(f'({_models.get(_model_display, _model_display)})', DIM, use_color)}")
     print(f"  {'Baixo risco':<20} {'visível' if include_low else 'filtrado'}")
     print(f"  {'JSON':<20} {export_json or '—'}")
     print(f"  {'HTML':<20} {export_html or '—'}")
@@ -563,11 +567,12 @@ def cmd_scan(args):
     if use_ai and findings_exploitaveis:
         print(f"  {c('[~] Inicializando Groq AI...', DIM, use_color)}")
         try:
-            from whei_ai import _get_client
-            groq_client = _get_client()
-            from whei_ai import GROQ_MODELS
-            model_id = GROQ_MODELS.get(model, model)
-            print(f"  {c(f'[✓] Groq conectado — {model_id}', ORANGE, use_color)}\n")
+            from whei_ai import _get_client, GROQ_MODELS, ANTHROPIC_MODELS
+            groq_client, _ = _get_client(provider=provider)
+            _models = ANTHROPIC_MODELS if provider == "anthropic" else GROQ_MODELS
+            _model_display = model or ("sonnet" if provider == "anthropic" else "scout")
+            model_id = _models.get(_model_display, _model_display)
+            print(f"  {c(f'[✓] {provider.capitalize()} conectado — {model_id}', ORANGE, use_color)}\n")
         except Exception as exc:
             print(f"  {c(f'[!] Groq indisponivel: {exc}', YELLOW, use_color)}\n")
             use_ai = False
@@ -587,7 +592,7 @@ def cmd_scan(args):
                 print(f"\n  {c('[~] Consultando IA...', DIM, use_color)}", end="", flush=True)
                 try:
                     from whei_ai import analyze_finding
-                    ai_result = analyze_finding(r, alvo, groq_client, target=target, model=model)
+                    ai_result = analyze_finding(r, alvo, groq_client, target=target, model=model, provider=provider)
                     findings_ai.append({**r, **ai_result, "_exploit_info": exploit_info})
                     print(f"\r  {c('[✓] IA concluida              ', ORANGE, use_color)}")
                     print_finding_ai(ai_result, i, use_color)
@@ -611,7 +616,7 @@ def cmd_scan(args):
             try:
                 from whei_ai import analyze_executive_summary
                 executive_ai = analyze_executive_summary(
-                    ai_exploitaveis, groq_client, target=target, model=model
+                    ai_exploitaveis, groq_client, target=target, model=model, provider=provider
                 )
                 print(f"\r  {c('[✓] Resumo concluido           ', ORANGE, use_color)}")
                 print_executive_summary(executive_ai, use_color)
@@ -697,6 +702,8 @@ exemplos:
   whei scan ./meu-repo --target web2 --ai --html relatorio.html
   whei scan ./meu-repo --target web2 --semgrep-config p/owasp-top-ten --ai
   whei scan ./meu-repo --target web2 --semgrep-config p/secrets --only high
+  whei scan ./meu-repo --target web2 --ai --provider anthropic --model sonnet
+  whei scan contrato.sol --ai --provider anthropic --model haiku
   whei scan . --only high --json out.json
   whei list
         """,
@@ -714,9 +721,13 @@ exemplos:
                         help="Motor: web3=Slither (padrão) | web2=Semgrep")
     p_scan.add_argument("--ai",          action="store_true", help="Ativar análise Groq AI")
     p_scan.add_argument("--model",
-                        choices=["scout", "versatile", "qwen"],
-                        default="scout",
-                        help="Modelo Groq: scout=llama-4-scout 500k TPD (padrão) | versatile=llama-3.3-70b 100k TPD | qwen=qwen3-32b 500k TPD")
+                        metavar="MODEL",
+                        default=None,
+                        help="Modelo: groq=[scout|versatile|qwen] | anthropic=[sonnet|haiku]")
+    p_scan.add_argument("--provider",
+                        choices=["groq", "anthropic"],
+                        default="groq",
+                        help="Provider de IA: groq (padrão, gratuito) | anthropic (pago, mais capaz)")
     p_scan.add_argument("--semgrep-config",
                         metavar="CFG",
                         default="auto",
