@@ -1,3 +1,7 @@
 slither-analyzer
 semgrep
 groq
+requests
+anthropic
+flask
+pyyaml

@@ -1,5 +1,5 @@
 """
-whei_ai.py — Módulo de integração com Groq para análise de segurança.
+whei_ai.py — Módulo de integração com AI providers para análise de segurança.
 
 Context-Aware: seleciona prompts de sistema conforme o domínio.
   - web3: EVM, Reentrância, CEI, modificadores, flash loans.
@@ -7,6 +7,14 @@ Context-Aware: seleciona prompts de sistema conforme o domínio.
 
 Produz por finding: explicação técnica, exploit, CVSS, PoC, fix e template.
 Produz no final: resumo executivo consolidado.
+
+Providers suportados:
+  - groq      (padrão, gratuito, GROQ_API_KEY)
+  - anthropic (pago, mais capaz, ANTHROPIC_API_KEY)
+  - deepseek  (custo baixo, chain-of-thought, DEEPSEEK_API_KEY)
+
+Fallback chain: deepseek → groq → offline (acionado automaticamente em caso
+de falha de inicialização do provider primário).
 """
 
 import os
@@ -147,6 +155,15 @@ ANTHROPIC_MODELS = {
 }
 DEFAULT_ANTHROPIC_MODEL = "sonnet"
 
+# DeepSeek — chave usada em --model quando --provider deepseek
+DEEPSEEK_MODELS = {
+    "chat":     "deepseek-chat",      # Rápido, suporta JSON mode, bom para triagem SAST
+    "reasoner": "deepseek-reasoner",  # Chain-of-thought interno, melhor qualidade, sem JSON mode
+}
+DEFAULT_DEEPSEEK_MODEL = "chat"
+
+_DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
+
 # Intervalo mínimo entre chamadas à API Groq (segundos).
 # O plano gratuito permite ~30 req/min → 2s de margem segura.
 _GROQ_CALL_DELAY = 2.0
@@ -163,6 +180,12 @@ try:
     ANTHROPIC_AVAILABLE = True
 except ImportError:
     ANTHROPIC_AVAILABLE = False
+
+
+class _DeepSeekClient:
+    """Lightweight wrapper that carries the DeepSeek API key."""
+    def __init__(self, api_key: str):
+        self.api_key = api_key
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -401,7 +424,7 @@ def _get_client(provider: str = "groq"):
     Retorna o cliente de IA configurado para o provider informado.
 
     Args:
-        provider: "groq" (padrão) ou "anthropic"
+        provider: "groq" (padrão), "anthropic" ou "deepseek"
 
     Returns:
         Tupla (client, provider_name) para uso em _call_ai()
@@ -420,6 +443,25 @@ def _get_client(provider: str = "groq"):
             )
         return anthropic.Anthropic(api_key=api_key), "anthropic"
 
+    if provider == "deepseek":
+        try:
+            import requests as _r
+            _ = _r  # verify import succeeds
+        except ImportError:
+            raise RuntimeError(
+                "Pacote requests nao instalado (necessario para DeepSeek).\n"
+                "Execute: pip install requests"
+            )
+        api_key = _load_env_key("DEEPSEEK_API_KEY")
+        if not api_key:
+            raise RuntimeError(
+                "DEEPSEEK_API_KEY nao encontrada.\n"
+                "Adicione ao .env:\n"
+                "  DEEPSEEK_API_KEY=sk-xxxxxxxxxxxxxxxxxxxx\n"
+                "Obtenha em: https://platform.deepseek.com/api_keys"
+            )
+        return _DeepSeekClient(api_key), "deepseek"
+
     # Groq (padrão)
     if not GROQ_AVAILABLE:
         raise RuntimeError("Pacote groq nao instalado. Execute: pip install groq")
@@ -431,6 +473,45 @@ def _get_client(provider: str = "groq"):
             "  GROQ_API_KEY=gsk_xxxxxxxxxxxxxxxxxxxx"
         )
     return Groq(api_key=api_key), "groq"
+
+
+def _get_client_with_fallback(provider: str = "groq"):
+    """
+    Tenta inicializar o provider solicitado; faz fallback para a cadeia
+    deepseek → groq se o provider primário falhar.
+
+    Returns:
+        Tupla (client, actual_provider_name)
+
+    Raises:
+        RuntimeError se todos os providers da cadeia falharem.
+    """
+    # Cadeia de fallback: provider solicitado primeiro, depois alternativas
+    chain = [provider]
+    if provider == "deepseek" and "groq" not in chain:
+        chain.append("groq")
+    elif provider == "groq" and "deepseek" not in chain:
+        chain.append("deepseek")
+
+    last_exc = None
+    for p in chain:
+        try:
+            client, actual = _get_client(p)
+            if p != provider:
+                import sys as _sys
+                print(
+                    f"\n  \033[93m[!] Provider '{provider}' indisponivel — "
+                    f"usando fallback '{actual}'\033[0m",
+                    file=_sys.stderr,
+                )
+            return client, actual
+        except Exception as exc:
+            last_exc = exc
+            continue
+
+    raise RuntimeError(
+        f"Todos os providers falharam. Ultimo erro: {last_exc}"
+    )
 
 
 def _call_groq(client, system: str, user: str, model: str = None) -> dict:
@@ -480,6 +561,41 @@ def _call_ai(client, provider: str, system: str, user: str, model: str = None) -
                 messages=[{"role": "user", "content": user}],
             )
             raw = response.content[0].text
+
+        elif provider == "deepseek":
+            import requests as _req
+            resolved_model = (
+                DEEPSEEK_MODELS.get(model, model)
+                if model and model in DEEPSEEK_MODELS
+                else DEEPSEEK_MODELS[DEFAULT_DEEPSEEK_MODEL]
+            )
+            payload: dict = {
+                "model":    resolved_model,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user",   "content": user},
+                ],
+                "temperature": 0.1,
+                "max_tokens":  8000,
+            }
+            # deepseek-chat supports JSON mode; deepseek-reasoner uses CoT internally
+            # and does not support response_format
+            if resolved_model == "deepseek-chat":
+                payload["response_format"] = {"type": "json_object"}
+
+            headers = {
+                "Authorization": f"Bearer {client.api_key}",
+                "Content-Type":  "application/json",
+            }
+            resp = _req.post(
+                _DEEPSEEK_API_URL,
+                headers=headers,
+                json=payload,
+                timeout=120,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            raw  = data["choices"][0]["message"]["content"]
 
         else:  # groq
             resolved_model = model or GROQ_MODELS[DEFAULT_MODEL]

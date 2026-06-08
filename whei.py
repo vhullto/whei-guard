@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Whei Guard — CLI de análise de segurança empresarial.
-Suporte a Web3 (Slither) e Web2 (Semgrep) via padrão Adapter.
+Whei Guard — Bug Bounty Platform & Enterprise AppSec Analyzer.
+Web3 (Slither) + Web2 (Semgrep) + Recon + Groq/Anthropic/DeepSeek AI.
 
 Uso:
   whei scan <alvo> [--target web3|web2] [--ai] [--json F] [--html F] [--only SEV]
+  whei recon <domain> [--url URL] [--json F] [--no-color]
   whei list
 """
 
@@ -222,7 +223,7 @@ def print_banner(use_color=True):
  ██║███╗██║██╔══██║██╔══╝  ██║    ██║   ██║██║   ██║██╔══██║██╔══██╗██║  ██║
  ╚███╔███╔╝██║  ██║███████╗██║    ╚██████╔╝╚██████╔╝██║  ██║██║  ██║██████╔╝
   ╚══╝╚══╝ ╚═╝  ╚═╝╚══════╝╚═╝     ╚═════╝  ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═════╝{r}
-{d}  Enterprise AppSec Analyzer  //  powered by Slither + Semgrep + Groq AI{r}
+{d}  Bug Bounty Platform  //  Recon + SAST (Web2/Web3) + Groq | Anthropic | DeepSeek AI{r}
 """)
 
 
@@ -460,11 +461,18 @@ def cmd_scan(args):
     print(f"  {'Alvo':<20} {alvo}")
     print(f"  {'Modo':<20} {c(target.upper(), ORANGE, use_color)}")
     print(f"  {'Filtro':<20} {only or 'todos'}")
-    print(f"  {'IA (Groq)':<20} {c('✦ ativa', ORANGE, use_color) if use_ai else '—'}")
+    print(f"  {'IA':<20} {c('✦ ativa', ORANGE, use_color) if use_ai else '—'}")
     if use_ai:
-        from whei_ai import GROQ_MODELS, ANTHROPIC_MODELS
-        _models = ANTHROPIC_MODELS if provider == "anthropic" else GROQ_MODELS
-        _model_display = model or ("sonnet" if provider == "anthropic" else "scout")
+        from whei_ai import GROQ_MODELS, ANTHROPIC_MODELS, DEEPSEEK_MODELS
+        if provider == "anthropic":
+            _models = ANTHROPIC_MODELS
+            _model_display = model or "sonnet"
+        elif provider == "deepseek":
+            _models = DEEPSEEK_MODELS
+            _model_display = model or "chat"
+        else:
+            _models = GROQ_MODELS
+            _model_display = model or "scout"
         print(f"  {'Provider':<20} {c(provider.upper(), ORANGE, use_color)}")
         print(f"  {'Modelo':<20} {c(_model_display, ORANGE, use_color)} {c(f'({_models.get(_model_display, _model_display)})', DIM, use_color)}")
     print(f"  {'Baixo risco':<20} {'visível' if include_low else 'filtrado'}")
@@ -559,22 +567,31 @@ def cmd_scan(args):
         findings_exibir += findings_skipped
         findings_exibir.sort(key=lambda r: SEVERITY_ORDER.get(r.get("impact", "Low"), 99))
 
-    # ─── Inicializa Groq ──────────────────────────────────────────────────────
+    # ─── Inicializa AI client (com fallback automático) ───────────────────────
     groq_client  = None
     findings_ai  = []
     executive_ai = {}
 
     if use_ai and findings_exploitaveis:
-        print(f"  {c('[~] Inicializando Groq AI...', DIM, use_color)}")
+        print(f"  {c(f'[~] Inicializando {provider.capitalize()} AI...', DIM, use_color)}")
         try:
-            from whei_ai import _get_client, GROQ_MODELS, ANTHROPIC_MODELS
-            groq_client, _ = _get_client(provider=provider)
-            _models = ANTHROPIC_MODELS if provider == "anthropic" else GROQ_MODELS
-            _model_display = model or ("sonnet" if provider == "anthropic" else "scout")
+            from whei_ai import _get_client_with_fallback, GROQ_MODELS, ANTHROPIC_MODELS, DEEPSEEK_MODELS
+            groq_client, actual_provider = _get_client_with_fallback(provider=provider)
+            if actual_provider == "anthropic":
+                _models = ANTHROPIC_MODELS
+                _model_display = model or "sonnet"
+            elif actual_provider == "deepseek":
+                _models = DEEPSEEK_MODELS
+                _model_display = model or "chat"
+            else:
+                _models = GROQ_MODELS
+                _model_display = model or "scout"
             model_id = _models.get(_model_display, _model_display)
+            if actual_provider != provider:
+                provider = actual_provider  # use the actually-connected provider downstream
             print(f"  {c(f'[✓] {provider.capitalize()} conectado — {model_id}', ORANGE, use_color)}\n")
         except Exception as exc:
-            print(f"  {c(f'[!] Groq indisponivel: {exc}', YELLOW, use_color)}\n")
+            print(f"  {c(f'[!] AI indisponivel: {exc}', YELLOW, use_color)}\n")
             use_ai = False
 
     # ─── Output por finding ───────────────────────────────────────────────────
@@ -667,6 +684,141 @@ def cmd_scan(args):
     sys.exit(1 if findings_exploitaveis else 0)
 
 
+def cmd_recon(args):
+    """Executa reconhecimento completo de um domínio alvo."""
+    use_color = _supports_color() and not args.no_color
+
+    print_banner(use_color)
+    print(f"  {'Domínio':<20} {args.domain}")
+    if args.url:
+        print(f"  {'Base URL':<20} {args.url}")
+    print()
+
+    try:
+        from whei_recon import ReconRunner
+    except ImportError as exc:
+        print(f"\n  {c('[x] whei_recon:', RED, use_color)} {exc}")
+        print(f"  Instale com: pip install requests")
+        sys.exit(2)
+
+    runner = ReconRunner(
+        domain    = args.domain,
+        base_url  = args.url or None,
+        verbose   = True,
+        use_color = use_color,
+    )
+
+    try:
+        runner.run()
+    except RuntimeError as exc:
+        print(f"\n  {c('[x]', RED, use_color)} {exc}")
+        sys.exit(2)
+
+    runner.print_summary()
+
+    json_path = args.json
+    if not json_path:
+        from datetime import datetime
+        ts        = datetime.now().strftime("%Y%m%d_%H%M%S")
+        json_path = f"recon_{args.domain}_{ts}.json"
+
+    try:
+        saved = runner.save_json(json_path)
+        print(f"  {c('[✓] JSON salvo:', ORANGE, use_color)} {saved}\n")
+    except OSError as exc:
+        print(f"  {c(f'[!] Erro ao salvar JSON: {exc}', YELLOW, use_color)}\n")
+
+
+def cmd_active(args):
+    """Run the active scanner against a domain."""
+    use_color = _supports_color() and not getattr(args, "no_color", False)
+
+    print_banner(use_color)
+    print(f"  {'Domain':<20} {args.domain}")
+
+    try:
+        from whei_scan_active import ActiveScanRunner
+    except ImportError as exc:
+        print(f"\n  {c('[x] whei_scan_active:', RED, use_color)} {exc}")
+        print(f"  Install with: pip install requests")
+        sys.exit(2)
+
+    # Load config from ~/.whei/config.yaml if it exists
+    from pathlib import Path
+    config: dict = {}
+    cfg_path = Path.home() / ".whei" / "config.yaml"
+    if cfg_path.exists():
+        try:
+            import yaml as _yaml
+            with open(cfg_path) as _f:
+                config = _yaml.safe_load(_f) or {}
+        except Exception:
+            try:
+                import json as _json
+                with open(cfg_path) as _f:
+                    config = _json.load(_f)
+            except Exception:
+                pass
+
+    runner = ActiveScanRunner(
+        domain    = args.domain,
+        config    = config,
+        verbose   = True,
+        use_color = use_color,
+    )
+
+    # Populate URLs
+    if getattr(args, "urls", None):
+        urls = [u.strip() for u in args.urls.split(",") if u.strip()]
+        runner.set_urls(urls)
+    elif getattr(args, "from_recon", None):
+        print(f"  {'Recon file':<20} {args.from_recon}")
+        try:
+            runner.load_recon(args.from_recon)
+        except FileNotFoundError:
+            print(f"\n  {c('[x]', RED, use_color)} Recon file not found: {args.from_recon}")
+            sys.exit(2)
+    else:
+        runner.set_urls([f"https://{args.domain}"])
+
+    try:
+        results = runner.run()
+    except RuntimeError as exc:
+        print(f"\n  {c('[x]', RED, use_color)} {exc}")
+        sys.exit(2)
+
+    runner.print_summary()
+
+    # AI analysis
+    if getattr(args, "ai", False):
+        provider = getattr(args, "provider", "groq")
+        print(f"\n  {c('[~] Running AI analysis with', ORANGE, use_color)} {provider} ...")
+        try:
+            from whei_ai import analyze_findings
+            summary = analyze_findings(
+                results.get("findings", []),
+                provider=provider,
+                model=getattr(args, "model", None),
+            )
+            print(f"\n  {c('AI Summary:', ORANGE, use_color)}")
+            for line in summary.splitlines():
+                print(f"  {line}")
+        except Exception as exc:
+            print(f"  {c(f'[!] AI analysis failed: {exc}', YELLOW, use_color)}")
+
+    # Save JSON
+    json_path = getattr(args, "json", None)
+    if json_path is None:
+        from datetime import datetime
+        ts        = datetime.now().strftime("%Y%m%d_%H%M%S")
+        json_path = f"active_{args.domain}_{ts}.json"
+    try:
+        saved = runner.save_json(json_path)
+        print(f"  {c('[✓] JSON saved:', ORANGE, use_color)} {saved}\n")
+    except OSError as exc:
+        print(f"  {c(f'[!] Failed to save JSON: {exc}', YELLOW, use_color)}\n")
+
+
 def cmd_list(args):
     use_color = _supports_color()
     try:
@@ -689,28 +841,56 @@ def cmd_list(args):
 def main():
     parser = argparse.ArgumentParser(
         prog="whei",
-        description="Whei Guard — Enterprise AppSec Analyzer (Web2 + Web3).",
+        description="Whei Guard — Bug Bounty Platform & Enterprise AppSec Analyzer.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 exemplos:
-  whei scan contrato.sol                         # Web3 com Slither (padrão)
-  whei scan contrato.sol --ai                    # + análise Groq AI
-  whei scan ./meu-repo --target web2             # Web2 com Semgrep
-  whei scan ./meu-repo --target web2 --ai        # + análise Groq AI (scout padrão)
-  whei scan ./meu-repo --target web2 --ai --model versatile  # usa llama-3.3-70b
-  whei scan ./meu-repo --target web2 --ai --model qwen       # usa qwen3-32b
-  whei scan ./meu-repo --target web2 --ai --html relatorio.html
+  # ── Recon ────────────────────────────────────────────────────────────────
+  whei recon example.com                                  # recon completo
+  whei recon example.com --url https://app.example.com   # URL base customizada
+  whei recon example.com --json recon.json               # salvar em JSON específico
+
+  # ── SAST Web2 (Semgrep) ───────────────────────────────────────────────────
+  whei scan ./meu-repo --target web2                      # Semgrep auto
+  whei scan ./meu-repo --target web2 --ai                 # + Groq AI (scout)
+  whei scan ./meu-repo --target web2 --ai --model versatile
+  whei scan ./meu-repo --target web2 --ai --provider deepseek
+  whei scan ./meu-repo --target web2 --ai --provider deepseek --model reasoner
+  whei scan ./meu-repo --target web2 --ai --provider anthropic --model sonnet
   whei scan ./meu-repo --target web2 --semgrep-config p/owasp-top-ten --ai
   whei scan ./meu-repo --target web2 --semgrep-config p/secrets --only high
-  whei scan ./meu-repo --target web2 --ai --provider anthropic --model sonnet
-  whei scan contrato.sol --ai --provider anthropic --model haiku
+  whei scan ./meu-repo --target web2 --ai --html relatorio.html
+
+  # ── SAST Web3 (Slither) ───────────────────────────────────────────────────
+  whei scan contrato.sol                                  # Slither (padrão)
+  whei scan contrato.sol --ai                             # + Groq AI
+  whei scan contrato.sol --ai --provider deepseek
   whei scan . --only high --json out.json
-  whei list
+
+  # ── Utils ─────────────────────────────────────────────────────────────────
+  whei list                                               # detectores Web3
         """,
     )
     subparsers = parser.add_subparsers(dest="comando")
     subparsers.required = True
 
+    # ── recon subcommand ──────────────────────────────────────────────────────
+    p_recon = subparsers.add_parser(
+        "recon",
+        help="Reconhecimento de um domínio (subdomains, JS endpoints, tech stack, Wayback)",
+    )
+    p_recon.add_argument("domain", help="Domínio alvo (ex: example.com)")
+    p_recon.add_argument(
+        "--url",
+        metavar="URL",
+        default=None,
+        help="URL base para fingerprinting/JS (padrão: https://<domain>)",
+    )
+    p_recon.add_argument("--json",     metavar="arquivo", help="Salvar resultado JSON (padrão: recon_<domain>_<ts>.json)")
+    p_recon.add_argument("--no-color", action="store_true", help="Desativar cores ANSI")
+    p_recon.set_defaults(func=cmd_recon)
+
+    # ── scan subcommand ───────────────────────────────────────────────────────
     p_scan = subparsers.add_parser("scan", help="Analisa um alvo (contrato ou repositório)")
     p_scan.add_argument("alvo",
                         metavar="alvo",
@@ -719,15 +899,23 @@ exemplos:
                         choices=["web3", "web2"],
                         default="web3",
                         help="Motor: web3=Slither (padrão) | web2=Semgrep")
-    p_scan.add_argument("--ai",          action="store_true", help="Ativar análise Groq AI")
+    p_scan.add_argument("--ai",          action="store_true", help="Ativar análise de IA")
     p_scan.add_argument("--model",
                         metavar="MODEL",
                         default=None,
-                        help="Modelo: groq=[scout|versatile|qwen] | anthropic=[sonnet|haiku]")
+                        help=(
+                            "Modelo: groq=[scout|versatile|qwen] | "
+                            "anthropic=[sonnet|haiku] | "
+                            "deepseek=[chat|reasoner]"
+                        ))
     p_scan.add_argument("--provider",
-                        choices=["groq", "anthropic"],
+                        choices=["groq", "anthropic", "deepseek"],
                         default="groq",
-                        help="Provider de IA: groq (padrão, gratuito) | anthropic (pago, mais capaz)")
+                        help=(
+                            "Provider de IA: groq (padrão, gratuito) | "
+                            "anthropic (pago, mais capaz) | "
+                            "deepseek (custo baixo, chain-of-thought)"
+                        ))
     p_scan.add_argument("--semgrep-config",
                         metavar="CFG",
                         default="auto",
@@ -738,6 +926,32 @@ exemplos:
     p_scan.add_argument("--no-color",    action="store_true", help="Desativar cores ANSI")
     p_scan.add_argument("--include-low", action="store_true", help="Incluir findings de baixo risco")
     p_scan.set_defaults(func=cmd_scan)
+
+    # ── active subcommand ─────────────────────────────────────────────────────
+    p_active = subparsers.add_parser(
+        "active",
+        help="Active HTTP scanner: CORS, open redirect, header injection, param fuzzing",
+    )
+    p_active.add_argument("domain", help="Target domain (e.g. example.com)")
+    p_active.add_argument(
+        "--from-recon", metavar="FILE",
+        help="Load URLs from a recon JSON file (output of: whei recon <domain>)",
+    )
+    p_active.add_argument(
+        "--urls", metavar="URL1,URL2,...",
+        help="Comma-separated list of URLs to scan",
+    )
+    p_active.add_argument("--ai",      action="store_true", help="Enable AI analysis of findings")
+    p_active.add_argument(
+        "--provider",
+        choices=["groq", "anthropic", "deepseek"],
+        default="groq",
+        help="AI provider (requires --ai)",
+    )
+    p_active.add_argument("--model",     metavar="MODEL", default=None, help="AI model override")
+    p_active.add_argument("--json",      metavar="FILE",  help="Save results to JSON file")
+    p_active.add_argument("--no-color",  action="store_true", help="Disable ANSI colors")
+    p_active.set_defaults(func=cmd_active)
 
     p_list = subparsers.add_parser("list", help="Lista detectores Web3 disponíveis")
     p_list.set_defaults(func=cmd_list)
